@@ -5,6 +5,8 @@ import pandas as pd
 import altair as alt
 from datetime import datetime, date
 from io import BytesIO
+from html import escape
+from PIL import Image, ImageDraw, ImageFont
 
 # 1. Konfigurasi Halaman Streamlit
 st.set_page_config(
@@ -26,6 +28,94 @@ def get_connection():
     except Error as e:
         st.error(f"Koneksi Database Gagal: {e}")
         return None
+
+
+def build_receipt_html(receipt):
+    item_rows = "".join(
+        f"<tr><td>{escape(item['nama_produk'])}</td>"
+        f"<td class='center'>{item['jumlah']}</td>"
+        f"<td class='right'>Rp{item['subtotal']:,.0f}</td></tr>"
+        for item in receipt["items"]
+    )
+    return f"""<!doctype html>
+<html><head><meta charset='utf-8'><title>Struk #{receipt['id_pesanan']}</title>
+<style>
+body {{ background: #eeeeee; font-family: Arial, sans-serif; margin: 0; }}
+.receipt {{ background: white; box-sizing: border-box; margin: 24px auto; padding: 24px; width: 380px; }}
+h1 {{ font-size: 20px; margin: 0; text-align: center; }}
+p {{ font-size: 12px; margin: 5px 0; }}
+table {{ border-collapse: collapse; font-size: 12px; margin: 18px 0; width: 100%; }}
+td {{ border-bottom: 1px dashed #999; padding: 7px 0; }}
+.center {{ text-align: center; }} .right {{ text-align: right; }}
+.total {{ border-top: 2px solid #111; font-weight: bold; font-size: 15px; }}
+.footer {{ border-top: 1px dashed #999; margin-top: 18px; padding-top: 12px; text-align: center; }}
+@media print {{ body {{ background: white; }} .receipt {{ margin: 0; width: 100%; }} }}
+</style></head><body><main class='receipt'>
+<h1>RESTORAN DAPUR INA AINA</h1>
+<p style='text-align:center'>Struk Pembayaran</p>
+<p>ID Pesanan: <b>#{receipt['id_pesanan']}</b></p>
+<p>Tanggal: {escape(receipt['waktu'])}</p>
+<table><thead><tr><th style='text-align:left'>Menu</th><th>Qty</th><th style='text-align:right'>Subtotal</th></tr></thead>
+<tbody>{item_rows}</tbody>
+<tfoot><tr><td colspan='2' class='total'>TOTAL</td><td class='right total'>Rp{receipt['total']:,.0f}</td></tr>
+<tr><td colspan='2'>Metode Bayar</td><td class='right'>{escape(receipt['metode'])}</td></tr>
+<tr><td colspan='2'>Dibayar</td><td class='right'>Rp{receipt['dibayar']:,.0f}</td></tr>
+<tr><td colspan='2'>Kembalian</td><td class='right'>Rp{receipt['kembalian']:,.0f}</td></tr></tfoot></table>
+<p class='footer'>Terima kasih atas kunjungan Anda.</p>
+</main></body></html>"""
+
+
+def build_receipt_image(receipt):
+    try:
+        small_font = ImageFont.truetype("DejaVuSans.ttf", 16)
+        bold_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 20)
+    except OSError:
+        small_font = bold_font = ImageFont.load_default()
+
+    line_height = 32
+    image_height = 420 + len(receipt["items"]) * line_height
+    image = Image.new("RGB", (700, image_height), "white")
+    draw = ImageDraw.Draw(image)
+    y = 24
+
+    def center(text, selected_font):
+        width = draw.textbbox((0, 0), text, font=selected_font)[2]
+        draw.text(((700 - width) / 2, y), text, fill="black", font=selected_font)
+
+    center("RESTORAN DAPUR INA AINA", bold_font)
+    y += 34
+    center("STRUK PEMBAYARAN", small_font)
+    y += 38
+    draw.text((30, y), f"ID Pesanan: #{receipt['id_pesanan']}", fill="black", font=small_font)
+    y += 25
+    draw.text((30, y), receipt["waktu"], fill="black", font=small_font)
+    y += 32
+    draw.line((30, y, 670, y), fill="black", width=2)
+    y += 14
+
+    for item in receipt["items"]:
+        draw.text((30, y), item["nama_produk"][:28], fill="black", font=small_font)
+        draw.text((430, y), f"x{item['jumlah']}", fill="black", font=small_font)
+        draw.text((530, y), f"Rp{item['subtotal']:,.0f}", fill="black", font=small_font)
+        y += line_height
+
+    draw.line((30, y, 670, y), fill="black", width=2)
+    y += 14
+    for label, value in [("TOTAL", receipt["total"]), ("DIBAYAR", receipt["dibayar"]), ("KEMBALIAN", receipt["kembalian"])]:
+        draw.text((30, y), label, fill="black", font=bold_font if label == "TOTAL" else small_font)
+        amount = f"Rp{value:,.0f}"
+        width = draw.textbbox((0, 0), amount, font=small_font)[2]
+        draw.text((670 - width, y), amount, fill="black", font=small_font)
+        y += 30
+    draw.text((30, y + 12), f"Metode: {receipt['metode']}", fill="black", font=small_font)
+    y += 42
+    footer = "Terima kasih atas kunjungan Anda."
+    width = draw.textbbox((0, 0), footer, font=small_font)[2]
+    draw.text(((700 - width) / 2, y), footer, fill="black", font=small_font)
+
+    output = BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
 
 # =========================================================
 # PERSISTENSI SESSION ON REFRESH (QUERY PARAMS)
@@ -675,6 +765,27 @@ elif st.session_state.role == "Kasir":
             """,
             unsafe_allow_html=True,
         )
+
+        receipt = st.session_state.get("receipt")
+        if receipt:
+            st.subheader("Struk Pembayaran")
+            receipt_html = build_receipt_html(receipt)
+            st.download_button(
+                "Download Struk untuk Dicetak",
+                data=receipt_html.encode("utf-8"),
+                file_name=f"struk_{receipt['id_pesanan']}.html",
+                mime="text/html",
+                use_container_width=True,
+            )
+            st.download_button(
+                "Download Struk sebagai Gambar",
+                data=build_receipt_image(receipt),
+                file_name=f"struk_{receipt['id_pesanan']}.png",
+                mime="image/png",
+                use_container_width=True,
+            )
+            st.components.v1.html(receipt_html, height=560, scrolling=False)
+
         if not st.session_state.keranjang:
             st.warning("Belum ada pesanan aktif. Silakan isi pesanan terlebih dahulu di menu 'Input Pesanan'.")
         else:
@@ -721,9 +832,25 @@ elif st.session_state.role == "Kasir":
                             conn.commit()
                             cursor.close()
 
-                            
+                            st.session_state.receipt = {
+                                "id_pesanan": id_pesanan,
+                                "waktu": waktu_sekarang,
+                                "items": [
+                                    {
+                                        "nama_produk": item["nama_produk"],
+                                        "jumlah": int(item["jumlah"]),
+                                        "subtotal": float(item["subtotal"]),
+                                    }
+                                    for item in st.session_state.keranjang.values()
+                                ],
+                                "total": total_tagihan,
+                                "metode": metode_bayar,
+                                "dibayar": float(jumlah_bayar),
+                                "kembalian": kembalian,
+                            }
                             st.success(f" Pembayaran Berhasil! Kembalian: Rp{kembalian:,.2f}")
                             st.session_state.keranjang = {}
+                            st.rerun()
                         except Error as e:
                             conn.rollback()
                             st.error(f"Gagal memproses transaksi: {e}")
